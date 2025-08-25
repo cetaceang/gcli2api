@@ -436,6 +436,86 @@
             cursor: pointer;
         }
         
+        /* 批量操作样式 */
+        .batch-controls {
+            background-color: #f8f9fa;
+            border: 1px solid #e1e4e8;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            margin-right: 15px;
+        }
+        .batch-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .batch-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .batch-btn.batch-enable {
+            background-color: #28a745;
+            color: white;
+        }
+        .batch-btn.batch-disable {
+            background-color: #6c757d;
+            color: white;
+        }
+        .batch-btn.batch-delete {
+            background-color: #dc3545;
+            color: white;
+        }
+        .batch-btn:disabled {
+            background-color: #e9ecef;
+            color: #6c757d;
+            cursor: not-allowed;
+        }
+        .selected-count {
+            font-weight: bold;
+            color: #007bff;
+            margin-right: 10px;
+        }
+        .select-all-checkbox {
+            margin-right: 8px;
+            transform: scale(1.2);
+        }
+        
+        /* 错误码筛选增强 */
+        .error-filter-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .error-code-badge {
+            display: inline-block;
+            background-color: #dc3545;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 11px;
+            margin: 1px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .error-code-badge:hover {
+            background-color: #c82333;
+        }
+        .error-code-badge.selected {
+            background-color: #007bff;
+        }
+        
         /* 配置管理样式 */
         .config-group {
             background-color: #f8f9fa;
@@ -713,6 +793,21 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     <button class="download-all-btn" onclick="downloadAllCreds()">打包下载所有文件</button>
                 </div>
                 
+                <!-- 批量操作控件 -->
+                <div class="batch-controls">
+                    <h4 style="margin-top: 0; margin-bottom: 10px;">批量操作</h4>
+                    <div class="batch-actions">
+                        <div class="checkbox-container">
+                            <input type="checkbox" id="selectAllCheckbox" class="select-all-checkbox" onchange="toggleSelectAll()">
+                            <label for="selectAllCheckbox">全选</label>
+                        </div>
+                        <span class="selected-count" id="selectedCount">已选择 0 项</span>
+                        <button class="batch-btn batch-enable" id="batchEnableBtn" onclick="batchAction('enable')" disabled>批量启用</button>
+                        <button class="batch-btn batch-disable" id="batchDisableBtn" onclick="batchAction('disable')" disabled>批量禁用</button>
+                        <button class="batch-btn batch-delete" id="batchDeleteBtn" onclick="batchAction('delete')" disabled>批量删除</button>
+                    </div>
+                </div>
+
                 <!-- 筛选和分页控件 -->
                 <div class="filter-container">
                     <label for="statusFilter">状态筛选：</label>
@@ -722,12 +817,30 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                         <option value="disabled">禁用</option>
                     </select>
                     
+                    <label for="errorCodeFilter">错误码筛选：</label>
+                    <select id="errorCodeFilter" class="filter-select" onchange="applyFilters()">
+                        <option value="all">全部错误码</option>
+                        <option value="no-errors">无错误</option>
+                        <option value="has-errors">有错误</option>
+                        <option value="400">错误码 400</option>
+                        <option value="401">错误码 401</option>
+                        <option value="403">错误码 403</option>
+                        <option value="404">错误码 404</option>
+                        <option value="429">错误码 429</option>
+                        <option value="500">错误码 500</option>
+                    </select>
+                    
                     <label for="pageSizeSelect">每页显示：</label>
                     <select id="pageSizeSelect" class="page-size-select" onchange="changePageSize()">
                         <option value="20">20</option>
                         <option value="50">50</option>
                         <option value="100">100</option>
                     </select>
+                    
+                    <div class="error-filter-container" id="errorFilterContainer">
+                        <span>快速筛选错误码：</span>
+                        <div id="errorCodeBadges"></div>
+                    </div>
                 </div>
                 
                 <div id="credsListSection">
@@ -953,7 +1066,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
     <script>
         let currentProjectId = '';
         let authInProgress = false;
-        let selectedFiles = [];
+        let uploadSelectedFiles = []; // 上传页面用的文件列表
         let authToken = '';
         let credsData = {};
         
@@ -962,6 +1075,9 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         let currentPage = 1;
         let pageSize = 20;
         let currentFilter = 'all';
+        let currentErrorCodeFilter = 'all';
+        let selectedCredFiles = new Set(); // 选中的凭证文件名集合
+        let availableErrorCodes = new Set(); // 所有可用的错误码
         let statsData = {
             total: 0,
             normal: 0,
@@ -1207,8 +1323,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         function addFiles(files) {
             files.forEach(file => {
                 if (file.type === 'application/json' || file.name.endsWith('.json')) {
-                    if (!selectedFiles.find(f => f.name === file.name && f.size === file.size)) {
-                        selectedFiles.push(file);
+                    if (!uploadSelectedFiles.find(f => f.name === file.name && f.size === file.size)) {
+                        uploadSelectedFiles.push(file);
                     }
                 } else {
                     showStatus(`文件 ${file.name} 不是有效的JSON文件`, 'error');
@@ -1222,7 +1338,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             const fileList = document.getElementById('fileList');
             const fileListSection = document.getElementById('fileListSection');
             
-            if (selectedFiles.length === 0) {
+            if (uploadSelectedFiles.length === 0) {
                 fileListSection.classList.add('hidden');
                 return;
             }
@@ -1230,7 +1346,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             fileListSection.classList.remove('hidden');
             fileList.innerHTML = '';
             
-            selectedFiles.forEach((file, index) => {
+            uploadSelectedFiles.forEach((file, index) => {
                 const fileItem = document.createElement('div');
                 fileItem.className = 'file-item';
                 fileItem.innerHTML = `
@@ -1245,12 +1361,12 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         }
 
         function removeFile(index) {
-            selectedFiles.splice(index, 1);
+            uploadSelectedFiles.splice(index, 1);
             updateFileList();
         }
 
         function clearFiles() {
-            selectedFiles = [];
+            uploadSelectedFiles = [];
             updateFileList();
         }
 
@@ -1261,7 +1377,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         }
 
         async function uploadFiles() {
-            if (selectedFiles.length === 0) {
+            if (uploadSelectedFiles.length === 0) {
                 showStatus('请选择要上传的文件', 'error');
                 return;
             }
@@ -1273,7 +1389,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             progressSection.classList.remove('hidden');
             
             const formData = new FormData();
-            selectedFiles.forEach(file => {
+            uploadSelectedFiles.forEach(file => {
                 formData.append('files', file);
             });
 
@@ -1568,6 +1684,9 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 disabled: 0
             };
             
+            // 清空并重新收集错误码
+            availableErrorCodes.clear();
+            
             for (const [fullPath, credInfo] of Object.entries(credsData)) {
                 statsData.total++;
                 
@@ -1576,7 +1695,43 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 } else {
                     statsData.normal++;
                 }
+                
+                // 收集错误码信息
+                if (credInfo.status.error_codes && credInfo.status.error_codes.length > 0) {
+                    credInfo.status.error_codes.forEach(code => {
+                        availableErrorCodes.add(code);
+                    });
+                }
             }
+            
+            // 更新错误码快速筛选按钮
+            updateErrorCodeBadges();
+        }
+        
+        // 更新错误码筛选快速按钮
+        function updateErrorCodeBadges() {
+            const errorCodeBadges = document.getElementById('errorCodeBadges');
+            errorCodeBadges.innerHTML = '';
+            
+            if (availableErrorCodes.size === 0) {
+                errorCodeBadges.innerHTML = '<span style="color: #28a745;">所有文件都无错误</span>';
+                return;
+            }
+            
+            const sortedCodes = Array.from(availableErrorCodes).sort((a, b) => a - b);
+            sortedCodes.forEach(code => {
+                const badge = document.createElement('span');
+                badge.className = 'error-code-badge';
+                badge.textContent = code;
+                badge.onclick = () => filterByErrorCode(code);
+                errorCodeBadges.appendChild(badge);
+            });
+        }
+        
+        // 按错误码快速筛选
+        function filterByErrorCode(code) {
+            document.getElementById('errorCodeFilter').value = code.toString();
+            applyFilters();
         }
         
         // 更新统计显示
@@ -1589,12 +1744,15 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         // 应用筛选
         function applyFilters() {
             const statusFilter = document.getElementById('statusFilter').value;
+            const errorCodeFilter = document.getElementById('errorCodeFilter').value;
             currentFilter = statusFilter;
+            currentErrorCodeFilter = errorCodeFilter;
             filteredCredsData = {};
             
             for (const [fullPath, credInfo] of Object.entries(credsData)) {
                 let shouldInclude = false;
                 
+                // 状态筛选
                 switch (statusFilter) {
                     case 'all':
                         shouldInclude = true;
@@ -1607,10 +1765,40 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                         break;
                 }
                 
+                // 如果状态筛选已经排除，跳过错误码筛选
+                if (!shouldInclude) {
+                    continue;
+                }
+                
+                // 错误码筛选
+                const errorCodes = credInfo.status.error_codes || [];
+                switch (errorCodeFilter) {
+                    case 'all':
+                        // 保持当前状态
+                        break;
+                    case 'no-errors':
+                        shouldInclude = errorCodes.length === 0;
+                        break;
+                    case 'has-errors':
+                        shouldInclude = errorCodes.length > 0;
+                        break;
+                    default:
+                        // 具体错误码筛选
+                        const targetCode = parseInt(errorCodeFilter);
+                        if (!isNaN(targetCode)) {
+                            shouldInclude = errorCodes.includes(targetCode);
+                        }
+                        break;
+                }
+                
                 if (shouldInclude) {
                     filteredCredsData[fullPath] = credInfo;
                 }
             }
+            
+            // 清空选择状态
+            selectedCredFiles.clear();
+            updateBatchControls();
             
             currentPage = 1;
             renderCredsList();
@@ -1651,6 +1839,9 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             }
             
             document.getElementById('paginationContainer').style.display = getTotalPages() > 1 ? 'flex' : 'none';
+            
+            // 更新批量控件状态
+            updateBatchControls();
         }
         
         // 更新分页信息
@@ -1746,7 +1937,10 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             
             div.innerHTML = `
                 <div class="cred-header">
-                    <div class="cred-filename">${filename}</div>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" class="file-checkbox" data-filename="${filename}" onchange="toggleFileSelection('${filename}')">
+                        <div class="cred-filename">${filename}</div>
+                    </div>
                     <div class="cred-status">${statusBadges}</div>
                 </div>
                 <div class="cred-actions">${actionButtons}</div>
@@ -2141,6 +2335,135 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             } catch (error) {
                 console.error('clearEnvCredentials error:', error);
                 showStatus(`网络错误: ${error.message}`, 'error');
+            }
+        }
+
+        // 批量操作相关函数
+        function toggleFileSelection(filename) {
+            if (selectedCredFiles.has(filename)) {
+                selectedCredFiles.delete(filename);
+            } else {
+                selectedCredFiles.add(filename);
+            }
+            updateBatchControls();
+        }
+        
+        function toggleSelectAll() {
+            const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+            const fileCheckboxes = document.querySelectorAll('.file-checkbox');
+            
+            if (selectAllCheckbox.checked) {
+                // 全选当前页面的文件
+                fileCheckboxes.forEach(checkbox => {
+                    const filename = checkbox.getAttribute('data-filename');
+                    selectedCredFiles.add(filename);
+                    checkbox.checked = true;
+                });
+            } else {
+                // 取消全选
+                selectedCredFiles.clear();
+                fileCheckboxes.forEach(checkbox => {
+                    checkbox.checked = false;
+                });
+            }
+            updateBatchControls();
+        }
+        
+        function updateBatchControls() {
+            const selectedCount = selectedCredFiles.size;
+            const selectedCountElement = document.getElementById('selectedCount');
+            const batchEnableBtn = document.getElementById('batchEnableBtn');
+            const batchDisableBtn = document.getElementById('batchDisableBtn');
+            const batchDeleteBtn = document.getElementById('batchDeleteBtn');
+            const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+            
+            selectedCountElement.textContent = `已选择 ${selectedCount} 项`;
+            
+            // 启用/禁用批量操作按钮
+            const hasSelection = selectedCount > 0;
+            batchEnableBtn.disabled = !hasSelection;
+            batchDisableBtn.disabled = !hasSelection;
+            batchDeleteBtn.disabled = !hasSelection;
+            
+            // 更新全选复选框状态
+            const currentPageFileCount = document.querySelectorAll('.file-checkbox').length;
+            const currentPageSelectedCount = Array.from(document.querySelectorAll('.file-checkbox'))
+                .filter(checkbox => selectedCredFiles.has(checkbox.getAttribute('data-filename'))).length;
+            
+            if (currentPageSelectedCount === 0) {
+                selectAllCheckbox.indeterminate = false;
+                selectAllCheckbox.checked = false;
+            } else if (currentPageSelectedCount === currentPageFileCount) {
+                selectAllCheckbox.indeterminate = false;
+                selectAllCheckbox.checked = true;
+            } else {
+                selectAllCheckbox.indeterminate = true;
+                selectAllCheckbox.checked = false;
+            }
+            
+            // 更新页面上的复选框状态
+            document.querySelectorAll('.file-checkbox').forEach(checkbox => {
+                const filename = checkbox.getAttribute('data-filename');
+                checkbox.checked = selectedCredFiles.has(filename);
+            });
+        }
+        
+        async function batchAction(action) {
+            const selectedFiles = Array.from(selectedCredFiles);
+            
+            if (selectedFiles.length === 0) {
+                showStatus('请先选择要操作的文件', 'error');
+                return;
+            }
+            
+            let confirmMessage = '';
+            switch (action) {
+                case 'enable':
+                    confirmMessage = `确定要启用选中的 ${selectedFiles.length} 个文件吗？`;
+                    break;
+                case 'disable':
+                    confirmMessage = `确定要禁用选中的 ${selectedFiles.length} 个文件吗？`;
+                    break;
+                case 'delete':
+                    confirmMessage = `确定要删除选中的 ${selectedFiles.length} 个文件吗？\n注意：此操作不可恢复！`;
+                    break;
+            }
+            
+            if (!confirm(confirmMessage)) {
+                return;
+            }
+            
+            try {
+                showStatus(`正在执行批量${action === 'enable' ? '启用' : action === 'disable' ? '禁用' : '删除'}操作...`, 'info');
+                
+                const requestBody = {
+                    action: action,
+                    filenames: selectedFiles
+                };
+                
+                const response = await fetch('/creds/batch-action', {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify(requestBody)
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showStatus(`批量操作完成：成功处理 ${data.success_count}/${selectedFiles.length} 个文件`, 'success');
+                    
+                    // 清空选择
+                    selectedCredFiles.clear();
+                    updateBatchControls();
+                    
+                    // 刷新列表
+                    await refreshCredsStatus();
+                } else {
+                    showStatus(`批量操作失败: ${data.detail || data.error || '未知错误'}`, 'error');
+                }
+            } catch (error) {
+                console.error('batchAction error:', error);
+                showStatus(`批量操作网络错误: ${error.message}`, 'error');
             }
         }
 

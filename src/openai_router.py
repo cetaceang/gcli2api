@@ -15,9 +15,8 @@ from .models import ChatCompletionRequest, ModelList, Model
 from .openai_transfer import openai_request_to_gemini, gemini_response_to_openai, gemini_stream_chunk_to_openai
 from .google_api_client import send_gemini_request, build_gemini_payload_from_openai
 from .credential_manager import CredentialManager
-from .retry_429 import retry_429_wrapper
-from .anti_truncation import apply_anti_truncation, apply_anti_truncation_to_stream
-from config import get_config_value, get_available_models, is_fake_streaming_model, is_anti_truncation_model, get_base_model_from_feature_model, get_anti_truncation_max_attempts
+from .anti_truncation import apply_anti_truncation_to_stream
+from config import get_available_models, is_fake_streaming_model, is_anti_truncation_model, get_base_model_from_feature_model, get_anti_truncation_max_attempts
 from log import log
 
 # 创建路由器
@@ -153,10 +152,7 @@ async def chat_completions(
             
             # 使用流式抗截断处理器
             gemini_response = await apply_anti_truncation_to_stream(
-                lambda payload: retry_429_wrapper(
-                    lambda: send_gemini_request(payload, True, creds, cred_mgr),
-                    cred_mgr
-                ),
+                lambda payload: send_gemini_request(payload, True, creds, cred_mgr),
                 api_payload,
                 max_attempts
             )
@@ -165,12 +161,9 @@ async def chat_completions(
         elif use_anti_truncation and not is_streaming:
             log.warning("抗截断功能仅在流式传输时有效，非流式请求将忽略此设置")
         
-        # 发送请求（包含429重试）
+        # 发送请求（429重试已在google_api_client中处理）
         is_streaming = getattr(request_data, "stream", False)
-        response = await retry_429_wrapper(
-            lambda: send_gemini_request(api_payload, is_streaming, creds, cred_mgr),
-            cred_mgr
-        )
+        response = await send_gemini_request(api_payload, is_streaming, creds, cred_mgr)
         
         # 如果是流式响应，直接返回
         if is_streaming:
@@ -192,6 +185,8 @@ async def chat_completions(
 
 async def fake_stream_response(api_payload: dict, creds, cred_mgr: CredentialManager, model: str):
     """处理假流式响应"""
+    import asyncio
+    
     async def stream_generator():
         try:
             # 发送心跳
@@ -204,11 +199,24 @@ async def fake_stream_response(api_payload: dict, creds, cred_mgr: CredentialMan
             }
             yield f"data: {json.dumps(heartbeat)}\n\n".encode()
             
+            # 异步发送实际请求
+            async def get_response():
+                return await send_gemini_request(api_payload, False, creds, cred_mgr)
+            
+            # 创建请求任务
+            response_task = asyncio.create_task(get_response())
+            
+            # 每3秒发送一次心跳，直到收到响应
+            while not response_task.done():
+                await asyncio.sleep(3.0)
+                if not response_task.done():
+                    yield f"data: {json.dumps(heartbeat)}\n\n".encode()
+            
+            # 获取响应结果
+            response = await response_task
+            
             # 发送实际请求
-            response = await retry_429_wrapper(
-                lambda: send_gemini_request(api_payload, False, creds, cred_mgr),
-                cred_mgr
-            )
+            # response 已在上面获取
             
             # 处理结果
             if hasattr(response, 'body'):
@@ -222,31 +230,53 @@ async def fake_stream_response(api_payload: dict, creds, cred_mgr: CredentialMan
                 response_data = json.loads(body_str)
                 log.debug(f"Fake stream response data: {response_data}")
                 
-                # 从Gemini响应中提取内容
+                # 从Gemini响应中提取内容，使用思维链分离逻辑
                 content = ""
+                reasoning_content = ""
                 if "candidates" in response_data and response_data["candidates"]:
-                    # Gemini格式响应
+                    # Gemini格式响应 - 使用思维链分离
+                    from .openai_transfer import _extract_content_and_reasoning
                     candidate = response_data["candidates"][0]
                     if "content" in candidate and "parts" in candidate["content"]:
-                        content = candidate["content"]["parts"][0].get("text", "")
+                        parts = candidate["content"]["parts"]
+                        content, reasoning_content = _extract_content_and_reasoning(parts)
                 elif "choices" in response_data and response_data["choices"]:
                     # OpenAI格式响应
                     content = response_data["choices"][0].get("message", {}).get("content", "")
                 
                 log.debug(f"Extracted content: {content}")
+                log.debug(f"Extracted reasoning: {reasoning_content[:100] if reasoning_content else 'None'}...")
+                
+                # 如果没有正常内容但有思维内容，给出警告
+                if not content and reasoning_content:
+                    log.warning(f"Fake stream response contains only thinking content: {reasoning_content[:100]}...")
+                    content = "[模型正在思考中，请稍后再试或重新提问]"
                 
                 if content:
+                    # 构建响应块，包括思维内容（如果有）
+                    delta = {"role": "assistant", "content": content}
+                    if reasoning_content:
+                        delta["reasoning_content"] = reasoning_content
+                    
                     content_chunk = {
                         "choices": [{
                             "index": 0,
-                            "delta": {"role": "assistant", "content": content},
+                            "delta": delta,
                             "finish_reason": "stop"
                         }]
                     }
                     yield f"data: {json.dumps(content_chunk)}\n\n".encode()
                 else:
                     log.warning(f"No content found in response: {response_data}")
-                    yield f"data: {body_str}\n\n".encode()
+                    # 如果完全没有内容，提供默认回复
+                    error_chunk = {
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "[响应为空，请重新尝试]"},
+                            "finish_reason": "stop"
+                        }]
+                    }
+                    yield f"data: {json.dumps(error_chunk)}\n\n".encode()
             except json.JSONDecodeError:
                 error_chunk = {
                     "choices": [{

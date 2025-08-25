@@ -19,7 +19,7 @@ CREDENTIALS_DIR = "./creds"
 AUTO_BAN_ENABLED = os.getenv("AUTO_BAN", "false").lower() in ("true", "1", "yes", "on")
 
 # 需要自动封禁的错误码
-AUTO_BAN_ERROR_CODES = [400, 403, 401]
+AUTO_BAN_ERROR_CODES = [400, 403]
 
 # Default Safety Settings for Google API
 DEFAULT_SAFETY_SETTINGS = [
@@ -249,13 +249,13 @@ BASE_MODELS = [
 
 def get_available_models(router_type="openai"):
     """
-    Get available models with feature suffixes.
+    Get available models with feature prefixes.
     
     Args:
         router_type: "openai" or "gemini"
         
     Returns:
-        List of model names with feature suffixes
+        List of model names with feature prefixes
     """
     models = []
     
@@ -263,28 +263,39 @@ def get_available_models(router_type="openai"):
         # 基础模型
         models.append(base_model)
         
-        # 假流式模型
-        models.append(f"{base_model}-假流式")
+        # 假流式模型 (前缀格式)
+        models.append(f"假流式/{base_model}")
         
-        # 流式抗截断模型 (仅在流式传输时有效)
-        models.append(f"{base_model}-流式抗截断")
+        # 流式抗截断模型 (仅在流式传输时有效，前缀格式)
+        models.append(f"流式抗截断/{base_model}")
+        
+        # 支持thinking模式后缀与功能前缀组合
+        for thinking_suffix in ["-maxthinking", "-nothinking"]:
+            # 基础模型 + thinking后缀
+            models.append(f"{base_model}{thinking_suffix}")
+            
+            # 假流式 + thinking后缀
+            models.append(f"假流式/{base_model}{thinking_suffix}")
+            
+            # 流式抗截断 + thinking后缀
+            models.append(f"流式抗截断/{base_model}{thinking_suffix}")
     
     return models
 
 def is_fake_streaming_model(model_name: str) -> bool:
     """Check if model name indicates fake streaming should be used."""
-    return model_name.endswith("-假流式")
+    return model_name.startswith("假流式/")
 
 def is_anti_truncation_model(model_name: str) -> bool:
     """Check if model name indicates anti-truncation should be used."""
-    return model_name.endswith("-流式抗截断")
+    return model_name.startswith("流式抗截断/")
 
 def get_base_model_from_feature_model(model_name: str) -> str:
     """Get base model name from feature model name."""
-    # Remove feature suffixes
-    for suffix in ["-假流式", "-流式抗截断"]:
-        if model_name.endswith(suffix):
-            return model_name[:-len(suffix)]
+    # Remove feature prefixes
+    for prefix in ["假流式/", "流式抗截断/"]:
+        if model_name.startswith(prefix):
+            return model_name[len(prefix):]
     return model_name
 
 def get_anti_truncation_max_attempts() -> int:

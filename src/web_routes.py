@@ -88,6 +88,10 @@ class CredFileActionRequest(BaseModel):
     filename: str
     action: str  # enable, disable, delete
 
+class CredFileBatchActionRequest(BaseModel):
+    action: str  # "enable", "disable", "delete"
+    filenames: List[str]  # 批量操作的文件名列表
+
 class ConfigSaveRequest(BaseModel):
     config: dict
 
@@ -353,11 +357,15 @@ async def creds_action(request: CredFileActionRequest, token: str = Depends(veri
             raise HTTPException(status_code=404, detail="文件不存在")
         
         if action == "enable":
+            log.info(f"Web request: ENABLING file {filename}")
             await credential_manager.set_cred_disabled(filename, False)
+            log.info(f"Web request: ENABLED file {filename} successfully")
             return JSONResponse(content={"message": f"已启用凭证文件 {os.path.basename(filename)}"})
         
         elif action == "disable":
+            log.info(f"Web request: DISABLING file {filename}")
             await credential_manager.set_cred_disabled(filename, True)
+            log.info(f"Web request: DISABLED file {filename} successfully")
             return JSONResponse(content={"message": f"已禁用凭证文件 {os.path.basename(filename)}"})
         
         elif action == "delete":
@@ -379,6 +387,100 @@ async def creds_action(request: CredFileActionRequest, token: str = Depends(veri
         raise
     except Exception as e:
         log.error(f"凭证文件操作失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/creds/batch-action")
+async def creds_batch_action(request: CredFileBatchActionRequest, token: str = Depends(verify_token)):
+    """批量对凭证文件执行操作（启用/禁用/删除）"""
+    try:
+        await ensure_credential_manager_initialized()
+        
+        action = request.action
+        filenames = request.filenames
+        
+        if not filenames:
+            raise HTTPException(status_code=400, detail="文件名列表不能为空")
+        
+        log.info(f"Performing batch action '{action}' on {len(filenames)} files")
+        
+        success_count = 0
+        errors = []
+        
+        from config import CREDENTIALS_DIR
+        
+        for filename in filenames:
+            try:
+                # 验证文件路径安全性
+                if not filename.endswith('.json'):
+                    errors.append(f"{filename}: 无效的文件类型")
+                    continue
+                
+                # 构建完整路径
+                if os.path.isabs(filename):
+                    fullpath = filename
+                else:
+                    fullpath = os.path.abspath(os.path.join(CREDENTIALS_DIR, filename))
+                
+                # 确保文件在CREDENTIALS_DIR内（安全检查）
+                credentials_dir_abs = os.path.abspath(CREDENTIALS_DIR)
+                fullpath_abs = os.path.abspath(fullpath)
+                if not fullpath_abs.startswith(credentials_dir_abs):
+                    errors.append(f"{filename}: 文件路径不在允许的目录内")
+                    continue
+                
+                if not os.path.exists(fullpath):
+                    errors.append(f"{filename}: 文件不存在")
+                    continue
+                
+                # 执行相应操作
+                if action == "enable":
+                    await credential_manager.set_cred_disabled(fullpath, False)
+                    success_count += 1
+                    
+                elif action == "disable":
+                    await credential_manager.set_cred_disabled(fullpath, True)
+                    success_count += 1
+                    
+                elif action == "delete":
+                    try:
+                        os.remove(fullpath)
+                        # 从状态中移除
+                        normalized_filename = os.path.abspath(fullpath)
+                        if normalized_filename in credential_manager._creds_state:
+                            del credential_manager._creds_state[normalized_filename]
+                            await credential_manager._save_state()
+                        success_count += 1
+                    except OSError as e:
+                        errors.append(f"{filename}: 删除文件失败 - {str(e)}")
+                        continue
+                else:
+                    errors.append(f"{filename}: 无效的操作类型")
+                    continue
+                    
+            except Exception as e:
+                log.error(f"Processing {filename} failed: {e}")
+                errors.append(f"{filename}: 处理失败 - {str(e)}")
+                continue
+        
+        # 构建返回消息
+        result_message = f"批量操作完成：成功处理 {success_count}/{len(filenames)} 个文件"
+        if errors:
+            result_message += f"\n错误详情：\n" + "\n".join(errors)
+            
+        response_data = {
+            "success_count": success_count,
+            "total_count": len(filenames),
+            "errors": errors,
+            "message": result_message
+        }
+        
+        return JSONResponse(content=response_data)
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"批量凭证文件操作失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

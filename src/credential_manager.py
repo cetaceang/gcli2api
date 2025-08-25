@@ -9,6 +9,7 @@ import glob
 import aiofiles
 import toml
 import base64
+import time
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Dict, Any
 import httpx
@@ -201,10 +202,23 @@ class CredentialManager:
             normalized_filename = os.path.abspath(filename)
             log.info(f"Setting disabled={disabled} for file: {normalized_filename}")
             cred_state = self._get_cred_state(normalized_filename)
+            old_disabled = cred_state.get("disabled", False)
             cred_state["disabled"] = disabled
             log.info(f"Updated state for {normalized_filename}: {cred_state}")
             await self._save_state()
             log.info(f"State saved successfully")
+            
+            # 如果状态发生了变化，强制重新发现文件并清空缓存
+            if old_disabled != disabled:
+                log.info(f"Credential disabled status changed from {old_disabled} to {disabled}, refreshing file list")
+                # 清空缓存，强制下次获取凭证时重新加载
+                self._cached_credentials = None
+                self._cached_project_id = None
+                self._cache_timestamp = 0
+                
+                # 立即重新发现文件以更新可用文件列表
+                await self._discover_credential_files()
+                log.info(f"File list refreshed. Available files: {len(self._credential_files)}")
 
     def get_creds_status(self) -> Dict[str, Dict[str, Any]]:
         """获取所有凭证的状态信息"""
@@ -385,6 +399,93 @@ class CredentialManager:
             self._current_credential_index = (self._current_credential_index + 1) % len(self._credential_files)
             self._call_count = 0  # Reset call counter
             log.info(f"Rotated to credential index {self._current_credential_index}")
+    
+    async def _force_rotate_credential(self):
+        """Force rotate to next credential immediately (used for 429 errors)."""
+        if len(self._credential_files) <= 1:
+            log.warning("Only one credential available, cannot rotate")
+            return
+        
+        old_index = self._current_credential_index
+        self._current_credential_index = (self._current_credential_index + 1) % len(self._credential_files)
+        self._call_count = 0  # Reset call counter
+        log.info(f"Force rotated from credential index {old_index} to {self._current_credential_index} due to 429 error")
+
+    async def _discover_credential_files_unlocked(self):
+        """在锁外进行文件发现操作（用于避免阻塞其他操作）"""
+        # 这个方法不使用锁，因为主要是文件系统读操作
+        # 文件列表的更新会在后续的 _discover_credential_files 中同步
+        
+        # 临时存储发现的文件
+        temp_files = []
+        
+        # 复制当前状态以避免并发修改问题
+        try:
+            from config import CREDENTIALS_DIR
+            import glob
+            
+            # 检查环境变量凭证（与 _discover_credential_files 保持一致）
+            for i in range(1, 11):
+                env_var_name = f"GOOGLE_CREDENTIALS_{i}" if i > 1 else "GOOGLE_CREDENTIALS"
+                env_creds = os.getenv(env_var_name)
+                
+                if env_creds:
+                    try:
+                        # 检查是否为base64编码
+                        try:
+                            import base64
+                            decoded = base64.b64decode(env_creds)
+                            env_creds = decoded.decode('utf-8')
+                        except:
+                            pass
+                        
+                        # 验证JSON格式
+                        import json
+                        json.loads(env_creds)
+                        
+                        # 创建临时文件路径标识
+                        temp_env_path = f"<ENV_{env_var_name}>"
+                        if not self.is_cred_disabled(temp_env_path):
+                            temp_files.append(temp_env_path)
+                        
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        log.error(f"Invalid JSON in {env_var_name}: {e}")
+            
+            # 检查文件系统中的凭证
+            if os.path.exists(CREDENTIALS_DIR):
+                json_pattern = os.path.join(CREDENTIALS_DIR, "*.json")
+                for filepath in glob.glob(json_pattern):
+                    normalized_path = os.path.abspath(filepath)
+                    if not self.is_cred_disabled(normalized_path):
+                        temp_files.append(normalized_path)
+            
+            # 在锁内快速更新文件列表
+            async with self._lock:
+                if temp_files != self._credential_files:
+                    old_files = set(self._credential_files)
+                    self._credential_files = temp_files
+                    new_files = set(self._credential_files)
+                    
+                    # 日志记录变化
+                    if old_files != new_files:
+                        added_files = new_files - old_files
+                        removed_files = old_files - new_files
+                        
+                        if added_files:
+                            log.info(f"发现新的可用凭证文件: {list(added_files)}")
+                            # 清除缓存以便使用新文件
+                            self._cached_credentials = None
+                            self._cached_project_id = None
+                            self._cache_timestamp = 0
+                        
+                        if removed_files:
+                            log.info(f"移除不可用凭证文件: {list(removed_files)}")
+        
+        except Exception as e:
+            log.error(f"Error in _discover_credential_files_unlocked: {e}")
+            # 发生错误时，回退到带锁的方法
+            async with self._lock:
+                await self._discover_credential_files()
 
     async def _load_credential_with_fallback(self, current_file: str) -> Tuple[Optional[Credentials], Optional[str]]:
         """Load credentials with fallback to next file on failure."""
@@ -399,32 +500,65 @@ class CredentialManager:
 
     async def get_credentials(self) -> Tuple[Optional[Credentials], Optional[str]]:
         """Get credentials with call-based rotation, caching and hot reload for performance."""
+        # 第一阶段：快速检查缓存（减少锁持有时间）
         async with self._lock:
-            # 修改文件检查策略：
-            # 1. 启动时读取一次creds文件
-            # 2. 当无任何creds时，每次使用chat都读取一次creds目录积极发现新文件
-            # 3. 当有creds文件时，每次轮换的时候读取一次
             current_calls_per_rotation = get_calls_per_rotation()
+            
+            # 检查是否可以使用缓存，并验证当前文件是否仍然可用
+            if self._is_cache_valid() and self._credential_files:
+                # 额外检查：确保当前使用的文件没有被禁用
+                current_file_still_valid = (
+                    self._current_file_path and 
+                    not self.is_cred_disabled(self._current_file_path) and
+                    self._current_file_path in self._credential_files
+                )
+                
+                if current_file_still_valid:
+                    log.debug(f"Using cached credentials (call count: {self._call_count}/{current_calls_per_rotation})")
+                    return self._cached_credentials, self._cached_project_id
+                else:
+                    log.info(f"Current credential file {self._current_file_path} is no longer valid, clearing cache")
+                    self._cached_credentials = None
+                    self._cached_project_id = None
+                    self._cache_timestamp = 0
+            
+            # 检查是否需要重新发现文件
             should_check_files = (
                 not self._credential_files or  # 无文件时每次都检查
                 self._call_count >= current_calls_per_rotation  # 轮换时检查
             )
+        
+        # 第二阶段：如果需要，在锁外进行文件发现（避免阻塞其他操作）
+        if should_check_files:
+            # 文件发现操作不需要锁，因为它主要是读操作
+            await self._discover_credential_files_unlocked()
+        
+        # 第三阶段：获取凭证（持有锁但时间较短）
+        async with self._lock:
+            current_calls_per_rotation = get_calls_per_rotation()  # 重新获取配置
             
-            if should_check_files:
-                await self._discover_credential_files()
-            
-            # Return cached credentials if valid and files exist
+            # 再次检查缓存（可能在文件发现过程中被其他操作更新）
             if self._is_cache_valid() and self._credential_files:
-                log.debug(f"Using cached credentials (call count: {self._call_count}/{current_calls_per_rotation})")
-                return self._cached_credentials, self._cached_project_id
+                # 验证当前文件是否仍然可用
+                current_file_still_valid = (
+                    self._current_file_path and 
+                    not self.is_cred_disabled(self._current_file_path) and
+                    self._current_file_path in self._credential_files
+                )
+                
+                if current_file_still_valid:
+                    log.debug(f"Using cached credentials after file discovery")
+                    return self._cached_credentials, self._cached_project_id
+                else:
+                    log.info(f"Current credential file {self._current_file_path} is no longer valid after file discovery, forcing reload")
             
-            # Cache miss or rotation needed - load fresh credentials
+            # 需要加载新凭证
             if self._call_count >= current_calls_per_rotation:
                 log.info(f"Rotating credentials after {self._call_count} calls")
             else:
                 log.info("Cache miss - loading fresh credentials")
             
-            # Rotate to next credential if we've reached the call limit
+            # 轮换凭证
             await self._rotate_credential_if_needed()
             
             if not self._credential_files:
@@ -433,15 +567,21 @@ class CredentialManager:
             
             current_file = self._credential_files[self._current_credential_index]
             
-            # Load credentials from file with fallback
-            creds, project_id = await self._load_credential_with_fallback(current_file)
+            # 记录当前使用的文件路径
+            self._current_file_path = current_file
             
+        # 第四阶段：在锁外加载凭证文件（避免I/O阻塞其他操作）
+        creds, project_id = await self._load_credential_with_fallback(current_file)
+        
+        # 第五阶段：更新缓存（短时间持有锁）
+        async with self._lock:
             if creds:
-                # Update cache
                 self._cached_credentials = creds
                 self._cached_project_id = project_id
-                self._current_file_path = current_file
-                log.info(f"Cached credentials from {current_file}")
+                self._cache_timestamp = time.time()
+                log.debug(f"Loaded and cached credentials from {os.path.basename(current_file)}")
+            else:
+                log.error(f"Failed to load credentials from {current_file}")
             
             return creds, project_id
 

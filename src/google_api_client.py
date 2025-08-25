@@ -157,10 +157,11 @@ async def send_gemini_request(payload: dict, is_streaming: bool = False, creds =
                         if retry_429_enabled and attempt < max_retries:
                             log.warning(f"[RETRY] 429 error encountered, retrying ({attempt + 1}/{max_retries})")
                             if credential_manager:
-                                await credential_manager.increment_call_count()
-                                await credential_manager._rotate_credential_if_needed()
-                                # 重新获取headers（凭证可能已轮换）
-                                headers, final_payload = await _prepare_request_headers_and_payload(payload, creds, credential_manager)
+                                # 429错误时强制轮换凭证，不增加调用计数
+                                await credential_manager._force_rotate_credential()
+                                # 重新获取凭证和headers（凭证可能已轮换）
+                                new_creds, _ = await credential_manager.get_credentials_and_project()
+                                headers, final_payload = await _prepare_request_headers_and_payload(payload, new_creds, credential_manager)
                                 final_post_data = json.dumps(final_payload)
                             await asyncio.sleep(retry_interval)
                             break  # 跳出内层处理，继续外层循环重试
@@ -221,10 +222,11 @@ async def send_gemini_request(payload: dict, is_streaming: bool = False, creds =
                         if retry_429_enabled and attempt < max_retries:
                             log.warning(f"[RETRY] 429 error encountered, retrying ({attempt + 1}/{max_retries})")
                             if credential_manager:
-                                await credential_manager.increment_call_count()
-                                await credential_manager._rotate_credential_if_needed()
-                                # 重新获取headers（凭证可能已轮换）
-                                headers, final_payload = await _prepare_request_headers_and_payload(payload, creds, credential_manager)
+                                # 429错误时强制轮换凭证，不增加调用计数
+                                await credential_manager._force_rotate_credential()
+                                # 重新获取凭证和headers（凭证可能已轮换）
+                                new_creds, _ = await credential_manager.get_credentials_and_project()
+                                headers, final_payload = await _prepare_request_headers_and_payload(payload, new_creds, credential_manager)
                                 final_post_data = json.dumps(final_payload)
                             await asyncio.sleep(retry_interval)
                             continue
@@ -433,7 +435,6 @@ async def _handle_non_streaming_response(resp: httpx.Response, credential_manage
         
         return _create_error_response(f"API error: {resp.status_code}", resp.status_code)
 
-
 def build_gemini_payload_from_openai(openai_payload: dict) -> dict:
     """
     Build a Gemini API payload from an OpenAI-transformed request.
@@ -441,15 +442,27 @@ def build_gemini_payload_from_openai(openai_payload: dict) -> dict:
     model = openai_payload.get("model")
     safety_settings = openai_payload.get("safetySettings", DEFAULT_SAFETY_SETTINGS)
     
+    # 构建请求数据，直接使用扁平化结构
     request_data = {
         "contents": openai_payload.get("contents"),
-        "systemInstruction": openai_payload.get("systemInstruction"),
-        "cachedContent": openai_payload.get("cachedContent"),
-        "tools": openai_payload.get("tools"),
-        "toolConfig": openai_payload.get("toolConfig"),
         "safetySettings": safety_settings,
         "generationConfig": openai_payload.get("generationConfig", {}),
     }
+    
+    # 添加系统指令（如果存在）
+    system_instruction = openai_payload.get("system_instruction")
+    if system_instruction:
+        if isinstance(system_instruction, str):
+            request_data["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        else:
+            request_data["systemInstruction"] = system_instruction
+    
+    # 添加其他可选字段
+    optional_fields = ["cachedContent", "tools", "toolConfig"]
+    for field in optional_fields:
+        value = openai_payload.get(field)
+        if value is not None:
+            request_data[field] = value
     
     # 移除None值
     request_data = {k: v for k, v in request_data.items() if v is not None}
