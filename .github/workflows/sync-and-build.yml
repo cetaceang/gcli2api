@@ -1,0 +1,151 @@
+name: Sync Fork and Build Docker Image
+
+on:
+  # 1. 定时触发：每小时执行一次同步
+  schedule:
+    - cron: '0 * * * *'
+  
+  # 2. 手动触发：允许您在 GitHub Actions 页面手动运行此工作流
+  workflow_dispatch:
+
+  # 3. Push 触发：当有代码推送到 master 分支时，触发构建和推送作业
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+
+jobs:
+  # 作业一：同步上游仓库
+  sync_fork:
+    runs-on: ubuntu-latest
+    # 仅在定时或手动触发时运行此作业
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+        with:
+          # 需要一个有写权限的 PAT (Personal Access Token) 来推送更新
+          token: ${{ secrets.PAT_TOKEN }}
+          fetch-depth: 0  # 获取完整的历史记录
+
+      - name: 配置 Git 用户信息
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+      - name: 安全同步上游仓库 (保护关键文件和目录)
+        run: |
+          echo "🔄 开始安全同步流程..."
+          
+          # 添加上游远程仓库
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            echo "➕ 添加上游远程仓库..."
+            git remote add upstream https://github.com/su-kaka/gcli2api.git
+          fi
+          
+          # 获取上游更新
+          echo "📥 获取上游更新..."
+          git fetch upstream master
+          
+          # 检查是否需要更新
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/master)
+          
+          if [ "$LOCAL_COMMIT" = "$UPSTREAM_COMMIT" ]; then
+            echo "✅ 仓库已是最新版本，无需同步"
+            exit 0
+          fi
+          
+          echo "🔍 检测到上游更新，开始同步..."
+          
+          # 备份关键文件和目录
+          echo "️ 备份关键文件和目录..."
+          BACKUP_DIR="/tmp/backup-$(date +%s)"
+          mkdir -p $BACKUP_DIR
+          
+          # 定义需要保护的文件/目录列表
+          PROTECTED_FILES=(".github" "Dockerfile" "docker-compose.yml" "docker-compose-bridge.yml")
+          
+          for item in "${PROTECTED_FILES[@]}"; do
+            if [ -e "$item" ]; then
+              echo "  -> 备份 $item"
+              cp -r "$item" "$BACKUP_DIR/"
+            else
+              echo "  -> $item 不存在，跳过备份"
+            fi
+          done
+          
+          # 强制重置到上游分支
+          echo "🔄 将 master 分支重置到 upstream/master..."
+          git reset --hard upstream/master
+          
+          # 恢复备份的文件和目录
+          echo " 恢复关键文件和目录..."
+          for item in "${PROTECTED_FILES[@]}"; do
+            if [ -e "$BACKUP_DIR/$(basename $item)" ]; then
+              echo "  -> 恢复 $item"
+              # 先删除可能存在的旧版本（以防万一）
+              rm -rf "$item"
+              # 从备份中恢复
+              cp -r "$BACKUP_DIR/$(basename $item)" .
+            fi
+          done
+          
+          # 清理备份目录
+          rm -rf $BACKUP_DIR
+          
+          # 提交更改
+          echo "💾 提交同步后的更改..."
+          # 使用 --allow-empty 确保即使没有文件变动（例如只有恢复操作）也能创建提交
+          # 这样可以触发后续的 build 作业
+          git add .
+          git commit -m "chore: 同步上游仓库并保护关键文件" --allow-empty
+          
+          # 推送更新
+          echo "🚀 推送更新到远程仓库..."
+          git push origin master --force
+          
+          echo "🎉 同步完成!"
+
+  # 作业二：构建并推送 Docker 镜像
+  build_and_push:
+    runs-on: ubuntu-latest
+    # 仅在代码被推送到 master 分支时运行此作业
+    # (同步作业成功后会产生一次 push，从而触发此作业)
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write # 需要 'packages' 的写权限来推送镜像到 GHCR
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }} # 自动获取您的 GitHub 用户名
+          password: ${{ secrets.GITHUB_TOKEN }}   # 使用 GitHub 自动提供的 GITHUB_TOKEN
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/gcli2api
+          tags: |
+            # 为镜像添加两个标签:
+            # 1. 具体版本号 (commit SHA)
+            type=sha
+            # 2. 当推送到默认分支 (master) 时，添加 'latest' 标签
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
