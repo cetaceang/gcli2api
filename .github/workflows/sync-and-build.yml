@@ -49,16 +49,15 @@ jobs:
           echo "📥 获取上游更新..."
           git fetch upstream master
           
-          # 检查是否需要更新
-          LOCAL_COMMIT=$(git rev-parse HEAD)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/master)
+          # 检查上游是否有我们本地尚未合并的新提交
+          NEW_COMMITS_COUNT=$(git rev-list --count HEAD..upstream/master)
           
-          if [ "$LOCAL_COMMIT" = "$UPSTREAM_COMMIT" ]; then
-            echo "✅ 仓库已是最新版本，无需同步"
+          if [ "$NEW_COMMITS_COUNT" -eq 0 ]; then
+            echo "✅ 上游没有新提交，无需同步"
             exit 0
           fi
           
-          echo "🔍 检测到上游更新，开始同步..."
+          echo "🔍 检测到上游有 $NEW_COMMITS_COUNT 个新提交，开始同步..."
           
           # 备份关键文件和目录
           echo "️ 备份关键文件和目录..."
