@@ -109,7 +109,7 @@ if __name__ == "__main__":
     host = get_server_host()
     
     log.info("=" * 60)
-    log.info("🚀 启动 GCLI2API 2.0 - 模块化架构")
+    log.info("🚀 启动 GCLI2API")
     log.info("=" * 60)
     log.info(f"📍 服务地址: http://127.0.0.1:{port}")
     log.info(f"🔧 控制面板: http://127.0.0.1:{port}/auth")

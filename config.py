@@ -34,11 +34,16 @@ DEFAULT_SAFETY_SETTINGS = [
 def get_base_model_name(model_name):
     """Convert variant model name to base model name."""
     # Remove all possible suffixes in order
-    suffixes = ["-maxthinking", "-nothinking"]
+    suffixes = ["-maxthinking", "-nothinking", "-search"]
     for suffix in suffixes:
         if model_name.endswith(suffix):
             return model_name[:-len(suffix)]
     return model_name
+
+# Helper function to check if model uses search grounding
+def is_search_model(model_name):
+    """Check if model name indicates search grounding should be enabled."""
+    return "-search" in model_name
 
 # Helper function to check if model uses no thinking
 def is_nothinking_model(model_name):
@@ -270,7 +275,7 @@ def get_available_models(router_type="openai"):
         models.append(f"流式抗截断/{base_model}")
         
         # 支持thinking模式后缀与功能前缀组合
-        for thinking_suffix in ["-maxthinking", "-nothinking"]:
+        for thinking_suffix in ["-maxthinking", "-nothinking", "-search"]:
             # 基础模型 + thinking后缀
             models.append(f"{base_model}{thinking_suffix}")
             

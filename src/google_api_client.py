@@ -15,6 +15,7 @@ from config import (
     get_base_model_name,
     get_thinking_budget,
     should_include_thoughts,
+    is_search_model,
     get_proxy_config,
     get_auto_ban_enabled,
     get_auto_ban_error_codes,
@@ -491,6 +492,14 @@ def build_gemini_payload_from_native(native_request: dict, model_from_path: str)
     
     native_request["generationConfig"]["thinkingConfig"]["includeThoughts"] = include_thoughts
     native_request["generationConfig"]["thinkingConfig"]["thinkingBudget"] = thinking_budget
+    
+    # Add Google Search grounding for search models
+    if is_search_model(model_from_path):
+        if "tools" not in native_request:
+            native_request["tools"] = []
+        # Add googleSearch tool if not already present
+        if not any(tool.get("googleSearch") for tool in native_request["tools"]):
+            native_request["tools"].append({"googleSearch": {}})
     
     return {
         "model": get_base_model_name(model_from_path),
