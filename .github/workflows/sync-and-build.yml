@@ -98,10 +98,18 @@ jobs:
           
           # 提交更改
           echo "💾 提交同步后的更改..."
-          # 使用 --allow-empty 确保即使没有文件变动（例如只有恢复操作）也能创建提交
-          # 这样可以触发后续的 build 作业
+          # 检查是否有实际的文件变动需要提交
           git add .
-          git commit -m "chore: 同步上游仓库并保护关键文件" --allow-empty
+          
+          # 如果 git diff --quiet --cached 返回 0，说明没有文件变动
+          if git diff --quiet --cached; then
+            echo "✅ 同步后无文件变动，无需推送"
+            exit 0
+          fi
+          
+          # 提交更改
+          echo "💾 检测到文件变动，提交同步后的更改..."
+          git commit -m "chore: 同步上游仓库并保护关键文件"
           
           # 推送更新
           echo "🚀 推送更新到远程仓库..."
