@@ -5,10 +5,13 @@ services:
     image: ghcr.io/cetaceang/gcli2api:latest
     container_name: gcli2api
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "7862:7861"
+      - "7863:8080"
+    networks:
+      - gcli2api-net
     environment:
-      - PASSWORD=pwd
-      - AUTO_BAN=false
+      - PASSWORD=your_password_here
     volumes:
       - ./data/creds:/app/geminicli/creds
     healthcheck:
@@ -17,3 +20,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+networks:
+  gcli2api-net:
+    driver: bridge
