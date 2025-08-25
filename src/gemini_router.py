@@ -110,8 +110,8 @@ async def list_gemini_models():
         "models": gemini_models
     })
 
-@router.post("/v1beta/models/{model}:generateContent")
-@router.post("/v1/models/{model}:generateContent")
+@router.post("/v1beta/models/{model:path}:generateContent")
+@router.post("/v1/models/{model:path}:generateContent")
 async def generate_content(
     model: str = Path(..., description="Model name"),
     request: Request = None,
@@ -213,8 +213,8 @@ async def generate_content(
             else:
                 raise HTTPException(status_code=500, detail="Response processing failed")
 
-@router.post("/v1beta/models/{model}:streamGenerateContent")
-@router.post("/v1/models/{model}:streamGenerateContent")
+@router.post("/v1beta/models/{model:path}:streamGenerateContent")
+@router.post("/v1/models/{model:path}:streamGenerateContent")
 async def stream_generate_content(
     model: str = Path(..., description="Model name"),
     request: Request = None,
@@ -297,8 +297,8 @@ async def stream_generate_content(
         # 直接返回流式响应
         return response
 
-@router.get("/v1beta/models/{model}")
-@router.get("/v1/models/{model}")
+@router.get("/v1beta/models/{model:path}")
+@router.get("/v1/models/{model:path}")
 async def get_model_info(
     model: str = Path(..., description="Model name"),
     api_key: str = Depends(authenticate_gemini_flexible)
