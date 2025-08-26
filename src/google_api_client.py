@@ -165,7 +165,7 @@ async def send_gemini_request(payload: dict, is_streaming: bool = False, creds =
                                 headers, final_payload = await _prepare_request_headers_and_payload(payload, new_creds, credential_manager)
                                 final_post_data = json.dumps(final_payload)
                             await asyncio.sleep(retry_interval)
-                            break  # 跳出内层处理，继续外层循环重试
+                            continue  # 跳出内层处理，继续外层循环重试
                         else:
                             # 返回429错误流
                             async def error_stream():

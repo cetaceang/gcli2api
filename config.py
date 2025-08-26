@@ -196,7 +196,7 @@ def get_retry_429_max_retries() -> int:
         except ValueError:
             pass
     
-    return int(get_config_value("retry_429_max_retries", 20))
+    return int(get_config_value("retry_429_max_retries", 10))
 
 def get_retry_429_enabled() -> bool:
     """Get 429 retry enabled setting."""
@@ -215,7 +215,7 @@ def get_retry_429_interval() -> float:
         except ValueError:
             pass
     
-    return float(get_config_value("retry_429_interval", 0.1))
+    return float(get_config_value("retry_429_interval", 0.5))
 
 def get_log_level() -> str:
     """

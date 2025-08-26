@@ -476,10 +476,21 @@
             background-color: #dc3545;
             color: white;
         }
+        .batch-btn.batch-email {
+            background-color: #17a2b8;
+            color: white;
+        }
         .batch-btn:disabled {
             background-color: #e9ecef;
             color: #6c757d;
             cursor: not-allowed;
+        }
+        .cred-btn.email {
+            background-color: #17a2b8;
+            color: white;
+        }
+        .cred-btn.email:hover {
+            background-color: #138496;
         }
         .selected-count {
             font-weight: bold;
@@ -805,6 +816,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                         <button class="batch-btn batch-enable" id="batchEnableBtn" onclick="batchAction('enable')" disabled>批量启用</button>
                         <button class="batch-btn batch-disable" id="batchDisableBtn" onclick="batchAction('disable')" disabled>批量禁用</button>
                         <button class="batch-btn batch-delete" id="batchDeleteBtn" onclick="batchAction('delete')" disabled>批量删除</button>
+                        <button class="batch-btn batch-email" onclick="refreshAllEmails()">刷新所有邮箱</button>
                     </div>
                 </div>
 
@@ -1932,14 +1944,26 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             actionButtons += `
                 <button class="cred-btn view" onclick="toggleCredDetails('${pathId}')">查看内容</button>
                 <button class="cred-btn download" onclick="downloadCred('${filename}')">下载</button>
+                <button class="cred-btn email" onclick="fetchUserEmail('${filename}')">获取邮箱</button>
                 <button class="cred-btn delete" data-filename="${filename}" data-action="delete">删除</button>
             `;
+            
+            // 构建邮箱显示
+            let emailInfo = '';
+            if (credInfo.user_email) {
+                emailInfo = `<div class="cred-email" style="font-size: 12px; color: #666; margin-top: 2px;">${credInfo.user_email}</div>`;
+            } else {
+                emailInfo = `<div class="cred-email" style="font-size: 12px; color: #999; margin-top: 2px; font-style: italic;">未获取邮箱</div>`;
+            }
             
             div.innerHTML = `
                 <div class="cred-header">
                     <div style="display: flex; align-items: center; gap: 10px;">
                         <input type="checkbox" class="file-checkbox" data-filename="${filename}" onchange="toggleFileSelection('${filename}')">
-                        <div class="cred-filename">${filename}</div>
+                        <div>
+                            <div class="cred-filename">${filename}</div>
+                            ${emailInfo}
+                        </div>
                     </div>
                     <div class="cred-status">${statusBadges}</div>
                 </div>
@@ -2464,6 +2488,65 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             } catch (error) {
                 console.error('batchAction error:', error);
                 showStatus(`批量操作网络错误: ${error.message}`, 'error');
+            }
+        }
+
+        // 邮箱相关函数
+        async function fetchUserEmail(filename) {
+            try {
+                showStatus('正在获取用户邮箱...', 'info');
+                
+                const response = await fetch(`/creds/fetch-email/${encodeURIComponent(filename)}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.user_email) {
+                    showStatus(`成功获取邮箱: ${data.user_email}`, 'success');
+                    // 刷新凭证状态以更新显示
+                    await refreshCredsStatus();
+                } else {
+                    showStatus(data.message || '无法获取用户邮箱', 'error');
+                }
+            } catch (error) {
+                console.error('fetchUserEmail error:', error);
+                showStatus(`获取邮箱失败: ${error.message}`, 'error');
+            }
+        }
+
+        async function refreshAllEmails() {
+            try {
+                if (!confirm('确定要刷新所有凭证的用户邮箱吗？这可能需要一些时间。')) {
+                    return;
+                }
+                
+                showStatus('正在刷新所有用户邮箱...', 'info');
+                
+                const response = await fetch('/creds/refresh-all-emails', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showStatus(`邮箱刷新完成：成功获取 ${data.success_count}/${data.total_count} 个邮箱地址`, 'success');
+                    // 刷新凭证状态以更新显示
+                    await refreshCredsStatus();
+                } else {
+                    showStatus(data.message || '邮箱刷新失败', 'error');
+                }
+            } catch (error) {
+                console.error('refreshAllEmails error:', error);
+                showStatus(`邮箱刷新网络错误: ${error.message}`, 'error');
             }
         }
 

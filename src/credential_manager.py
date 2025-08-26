@@ -26,6 +26,53 @@ from config import (
 from .utils import get_user_agent, get_client_metadata
 from log import log
 
+def _normalize_to_relative_path(filepath: str, base_dir: str = None) -> str:
+    """将文件路径标准化为相对于CREDENTIALS_DIR的相对路径"""
+    if base_dir is None:
+        from config import CREDENTIALS_DIR
+        base_dir = CREDENTIALS_DIR
+    
+    # 如果已经是相对路径且在当前目录内，直接返回
+    if not os.path.isabs(filepath):
+        # 检查相对路径是否安全（不包含..等）
+        if ".." not in filepath and filepath.endswith('.json'):
+            return os.path.basename(filepath)  # 只保留文件名
+    
+    # 绝对路径转相对路径
+    abs_filepath = os.path.abspath(filepath)
+    abs_base_dir = os.path.abspath(base_dir)
+    
+    try:
+        # 如果文件在base_dir内，返回相对路径（只要文件名）
+        if abs_filepath.startswith(abs_base_dir):
+            return os.path.basename(abs_filepath)
+    except Exception:
+        pass
+    
+    # 环境变量路径保持原样
+    if filepath.startswith('<ENV_'):
+        return filepath
+    
+    # 其他情况也只返回文件名
+    return os.path.basename(filepath)
+
+def _relative_to_absolute_path(relative_path: str, base_dir: str = None) -> str:
+    """将相对路径转换为绝对路径"""
+    if base_dir is None:
+        from config import CREDENTIALS_DIR
+        base_dir = CREDENTIALS_DIR
+    
+    # 环境变量路径保持原样
+    if relative_path.startswith('<ENV_'):
+        return relative_path
+    
+    # 如果已经是绝对路径，直接返回
+    if os.path.isabs(relative_path):
+        return relative_path
+    
+    # 相对路径转绝对路径
+    return os.path.abspath(os.path.join(base_dir, relative_path))
+
 class CredentialManager:
     """High-performance credential manager with call-based rotation and caching."""
 
@@ -111,42 +158,53 @@ class CredentialManager:
 
     
     def _get_cred_state(self, filename: str) -> Dict[str, Any]:
-        """获取指定凭证文件的状态"""
-        # 标准化路径以确保一致性
-        normalized_filename = os.path.abspath(filename)
+        """获取指定凭证文件的状态，使用相对路径作为键"""
+        # 标准化为相对路径
+        relative_filename = _normalize_to_relative_path(filename)
         
-        # 先检查是否已存在（可能用不同的路径格式）
+        # 先检查是否已存在（支持向后兼容）
         existing_state = None
         existing_key = None
-        for key, state in self._creds_state.items():
-            if os.path.abspath(key) == normalized_filename:
-                existing_state = state
-                existing_key = key
-                break
+        
+        # 优先查找相对路径键
+        if relative_filename in self._creds_state:
+            return self._creds_state[relative_filename]
+        
+        # 向后兼容：查找可能的绝对路径键并迁移
+        for key, state in list(self._creds_state.items()):
+            if os.path.isabs(key):
+                # 检查绝对路径是否对应同一个文件
+                if _normalize_to_relative_path(key) == relative_filename:
+                    existing_state = state
+                    existing_key = key
+                    break
+            elif key == relative_filename:
+                # 理论上不会到这里，但为安全起见
+                return state
         
         if existing_state is not None:
-            # 如果找到了现有状态但路径格式不同，更新键名
-            if existing_key != normalized_filename:
-                self._creds_state[normalized_filename] = existing_state
-                del self._creds_state[existing_key]
-                log.debug(f"Updated state key from {existing_key} to {normalized_filename}")
+            # 迁移绝对路径键到相对路径键
+            self._creds_state[relative_filename] = existing_state
+            del self._creds_state[existing_key]
+            log.info(f"Migrated creds state key from absolute to relative: {existing_key} -> {relative_filename}")
             return existing_state
         
-        # 只有真正没有找到时才创建新状态
-        if normalized_filename not in self._creds_state:
-            log.debug(f"Creating new state for {normalized_filename}")
-            self._creds_state[normalized_filename] = {
-                "error_codes": [],
-                "disabled": False,
-                "last_success": None
-            }
-        return self._creds_state[normalized_filename]
+        # 创建新状态（使用相对路径作为键）
+        log.debug(f"Creating new state for {relative_filename}")
+        self._creds_state[relative_filename] = {
+            "error_codes": [],
+            "disabled": False,
+            "last_success": None,
+            "user_email": None
+        }
+        return self._creds_state[relative_filename]
 
     async def record_error(self, filename: str, status_code: int, response_content: str = ""):
         """记录API错误码"""
         async with self._lock:
-            normalized_filename = os.path.abspath(filename)
-            cred_state = self._get_cred_state(normalized_filename)
+            # 使用相对路径进行状态管理
+            relative_filename = _normalize_to_relative_path(filename)
+            cred_state = self._get_cred_state(filename)
             
             # 记录错误码
             if "error_codes" not in cred_state:
@@ -156,7 +214,7 @@ class CredentialManager:
             
             # 简单记录429错误，不做特殊处理
             if status_code == 429:
-                log.info(f"Got 429 error for {os.path.basename(normalized_filename)}")
+                log.info(f"Got 429 error for {os.path.basename(filename)}")
             
             # 自动封禁功能
             auto_ban_enabled = get_auto_ban_enabled()
@@ -165,9 +223,9 @@ class CredentialManager:
             if auto_ban_enabled and status_code in auto_ban_error_codes:
                 if not cred_state.get("disabled", False):
                     cred_state["disabled"] = True
-                    log.warning(f"AUTO_BAN: Disabled credential {os.path.basename(normalized_filename)} due to error {status_code}")
+                    log.warning(f"AUTO_BAN: Disabled credential {os.path.basename(filename)} due to error {status_code}")
                 else:
-                    log.debug(f"Credential {os.path.basename(normalized_filename)} already disabled, error {status_code} recorded")
+                    log.debug(f"Credential {os.path.basename(filename)} already disabled, error {status_code} recorded")
             elif auto_ban_enabled:
                 log.debug(f"AUTO_BAN enabled but status_code {status_code} not in ban list {auto_ban_error_codes}")
             else:
@@ -178,17 +236,85 @@ class CredentialManager:
     async def record_success(self, filename: str, api_type: str = "other"):
         """记录成功的API调用"""
         async with self._lock:
-            normalized_filename = os.path.abspath(filename)
-            cred_state = self._get_cred_state(normalized_filename)
+            # 使用相对路径进行状态管理
+            cred_state = self._get_cred_state(filename)
             
             # 只有聊天内容生成API成功才清除错误码，其他API不清除
             if api_type == "chat_content":
                 cred_state["error_codes"] = []
-                log.debug(f"Cleared error codes for {normalized_filename} due to successful chat content generation")
+                log.debug(f"Cleared error codes for {filename} due to successful chat content generation")
             
             cred_state["last_success"] = datetime.now(timezone.utc).isoformat()
             
             await self._save_state()
+
+    async def fetch_user_email(self, filename: str) -> Optional[str]:
+        """获取凭证对应的用户邮箱地址"""
+        try:
+            # 加载凭证
+            creds, _ = await self._load_credentials_from_file(filename)
+            if not creds or not creds.token:
+                log.warning(f"无法加载凭证或获取访问令牌: {filename}")
+                return None
+            
+            # 刷新令牌如果需要
+            if creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(GoogleAuthRequest())
+                except Exception as e:
+                    log.warning(f"刷新凭证失败 {filename}: {e}")
+                    return None
+            
+            # 调用Google userinfo API获取邮箱
+            if not self._http_client:
+                log.warning("HTTP客户端未初始化")
+                return None
+                
+            headers = {
+                "Authorization": f"Bearer {creds.token}",
+                "Accept": "application/json"
+            }
+            
+            response = await self._http_client.get(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                user_info = response.json()
+                email = user_info.get("email")
+                if email:
+                    log.info(f"成功获取邮箱地址: {email} for {os.path.basename(filename)}")
+                    return email
+                else:
+                    log.warning(f"userinfo响应中没有邮箱信息: {user_info}")
+                    return None
+            else:
+                log.warning(f"获取用户信息失败 {filename}: HTTP {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            log.error(f"获取用户邮箱失败 {filename}: {e}")
+            return None
+
+    async def get_or_fetch_user_email(self, filename: str) -> Optional[str]:
+        """获取用户邮箱（优先使用缓存，如果没有则从API获取）"""
+        async with self._lock:
+            cred_state = self._get_cred_state(filename)
+            
+            # 检查是否已经有邮箱信息
+            if "user_email" in cred_state and cred_state["user_email"]:
+                return cred_state["user_email"]
+        
+        # 从API获取邮箱
+        email = await self.fetch_user_email(filename)
+        if email:
+            async with self._lock:
+                cred_state = self._get_cred_state(filename)
+                cred_state["user_email"] = email
+                await self._save_state()
+        
+        return email
 
 
     def is_cred_disabled(self, filename: str) -> bool:
@@ -199,12 +325,12 @@ class CredentialManager:
     async def set_cred_disabled(self, filename: str, disabled: bool):
         """设置凭证的禁用状态"""
         async with self._lock:
-            normalized_filename = os.path.abspath(filename)
-            log.info(f"Setting disabled={disabled} for file: {normalized_filename}")
-            cred_state = self._get_cred_state(normalized_filename)
+            relative_filename = _normalize_to_relative_path(filename)
+            log.info(f"Setting disabled={disabled} for file: {relative_filename}")
+            cred_state = self._get_cred_state(filename)
             old_disabled = cred_state.get("disabled", False)
             cred_state["disabled"] = disabled
-            log.info(f"Updated state for {normalized_filename}: {cred_state}")
+            log.info(f"Updated state for {relative_filename}: {cred_state}")
             await self._save_state()
             log.info(f"State saved successfully")
             
@@ -232,20 +358,22 @@ class CredentialManager:
         all_files = sorted(list(set(all_files)))
         
         for filename in all_files:
-            # 标准化路径以确保一致性
-            normalized_filename = os.path.abspath(filename)
-            cred_state = self._get_cred_state(normalized_filename)
+            # 使用相对路径作为键，但返回时仍使用绝对路径（兼容前端）
+            absolute_filename = os.path.abspath(filename)
+            cred_state = self._get_cred_state(filename)
             file_status = {
                 "error_codes": cred_state.get("error_codes", []),
                 "disabled": cred_state.get("disabled", False),
-                "last_success": cred_state.get("last_success")
+                "last_success": cred_state.get("last_success"),
+                "user_email": cred_state.get("user_email")
             }
-            status[normalized_filename] = file_status
+            status[absolute_filename] = file_status
             
             # 调试：记录特定文件的状态
             basename = os.path.basename(filename)
             if "atomic-affinity" in basename:
-                log.info(f"Status for {basename}: disabled={file_status['disabled']} (normalized: {normalized_filename})")
+                relative_filename = _normalize_to_relative_path(filename)
+                log.info(f"Status for {basename}: disabled={file_status['disabled']} (normalized: {relative_filename})")
                 
         return status
 
@@ -357,13 +485,15 @@ class CredentialManager:
 
     async def _sync_state_with_files(self, current_files: List[str]):
         """同步状态文件与实际文件"""
-        # 标准化当前文件列表
-        normalized_current_files = [os.path.abspath(f) for f in current_files]
+        # 标准化当前文件列表为相对路径
+        normalized_current_files = [_normalize_to_relative_path(f) for f in current_files]
         
         # 移除不存在文件的状态
         files_to_remove = []
         for filename in list(self._creds_state.keys()):
-            if filename not in normalized_current_files:
+            # 将状态文件中的键也标准化为相对路径进行比较
+            normalized_state_key = _normalize_to_relative_path(filename) if not filename.startswith('<ENV_') else filename
+            if normalized_state_key not in normalized_current_files:
                 files_to_remove.append(filename)
         
         if files_to_remove:
@@ -455,9 +585,9 @@ class CredentialManager:
             if os.path.exists(CREDENTIALS_DIR):
                 json_pattern = os.path.join(CREDENTIALS_DIR, "*.json")
                 for filepath in glob.glob(json_pattern):
-                    normalized_path = os.path.abspath(filepath)
-                    if not self.is_cred_disabled(normalized_path):
-                        temp_files.append(normalized_path)
+                    # 检查禁用状态（内部使用相对路径），但文件列表保持绝对路径（供文件I/O使用）
+                    if not self.is_cred_disabled(filepath):
+                        temp_files.append(os.path.abspath(filepath))
             
             # 在锁内快速更新文件列表
             async with self._lock:
