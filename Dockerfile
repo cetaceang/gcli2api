@@ -1,16 +1,18 @@
-# 基础镜像
+# 步骤 1: 使用轻量的 slim 基础镜像
 FROM python:3.13-slim
 
+# 设置工作目录
 WORKDIR /app
 
-# 仅复制依赖文件用于缓存层
+# 步骤 2: 复制依赖文件
 COPY requirements.txt .
 
-# Python 依赖 
-RUN pip install -r requirements.txt
+# 步骤 3: 使用 pip 安装 Python 依赖
+# --no-cache-dir 是一个最佳实践，可以减小镜像体积
+RUN pip install -r requirements.txt --no-cache-dir
 
-# 复制其余代码
+# 步骤 4: 复制项目代码
 COPY . .
 
-# 默认启动命令
+# 步骤 5: 设置容器的默认启动命令
 CMD ["python", "web.py"]
