@@ -1,35 +1,18 @@
-# Multi-stage build for gcli2api
-FROM python:3.13-slim as base
+# 步骤 1: 使用轻量的 slim 基础镜像
+FROM python:3.13-slim
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
+# 设置工作目录
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy only requirements first for better caching
+# 步骤 2: 复制依赖文件
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# 步骤 3: 使用 pip 安装 Python 依赖
+# --no-cache-dir 是一个最佳实践，可以减小镜像体积
+RUN pip install -r requirements.txt --no-cache-dir
 
-# Copy application code
+# 步骤 4: 复制项目代码
 COPY . .
 
-# Expose port
-EXPOSE 7861
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import urllib.request, os; port = os.environ.get('PORT', '7861'); pwd = os.environ.get('PASSWORD', 'pwd'); req = urllib.request.Request(f'http://localhost:{port}/v1/models', headers={'Authorization': f'Bearer {pwd}'}); urllib.request.urlopen(req, timeout=5)"
-
-# Default command
+# 步骤 5: 设置容器的默认启动命令
 CMD ["python", "web.py"]
