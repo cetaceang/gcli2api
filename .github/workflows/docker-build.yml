@@ -1,27 +1,34 @@
-name: Manual Docker Build and Push
+name: Build and Push Docker Image
 
 on:
-  # 允许您在 GitHub Actions 页面手动运行此工作流
+  # 当推送到 main 分支时触发
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+
+  # 允许手动触发
   workflow_dispatch:
 
 jobs:
-  # 作业：构建并推送 Docker 镜像
   build_and_push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # 需要 'packages' 的写权限来推送镜像到 GHCR
-    
+      packages: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Log in to the GitHub Container Registry
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }} # 自动获取您的 GitHub 用户名
-          password: ${{ secrets.GITHUB_TOKEN }}   # 使用 GitHub 自动提供的 GITHUB_TOKEN
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
@@ -29,10 +36,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/gcli2api
           tags: |
-            # 为镜像添加两个标签:
-            # 1. 具体版本号 (commit SHA)
+            # commit SHA 标签
             type=sha
-            # 2. 当推送到默认分支 (master) 时，添加 'latest' 标签
+            # latest 标签
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
